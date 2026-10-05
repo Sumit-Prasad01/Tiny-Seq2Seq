@@ -1,0 +1,35 @@
+# Deep Learning Core
+# torch>=2.2.0
+transformers>=4.40.0
+datasets>=2.19.0
+accelerate>=0.30.0
+peft>=0.11.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+
+# Experiment Tracking & Metrics
+mlflow==3.14.0
+evaluate>=0.4.1
+sacrebleu>=2.4.0
+rouge-score>=0.1.2
+nltk>=3.8.1
+pytest>=8.0.0
+
+
+# C++ Python Bindings
+pybind11>=2.12.0
+setuptools>=69.0.0
+
+# Data & Utilities
+pandas>=2.2.0
+numpy>=1.26.0
+pyyaml>=6.0.1
+pydantic>=2.7.0
+psutil>=5.9.0
+tabulate>=0.9.0
+python-dotenv>=1.0.0
+
+# Visualization
+matplotlib>=3.8.0
+seaborn>=0.13.0
+scikit-learn>=1.4.0
