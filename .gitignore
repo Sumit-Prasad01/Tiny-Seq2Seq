@@ -80,7 +80,10 @@ bin/
 obj/
 out/
 .vs/
+cpp/build/
+Release/
 CMakeProfiles/
+
 
 seq2seq-small-implementation-plan.md
 outputs/
