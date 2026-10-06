@@ -2,6 +2,7 @@
 Training subpackage for Tiny-Seq2Seq.
 """
 
+from src.seq2seq.training.averaging import average_checkpoints, load_averaged_model
 from src.seq2seq.training.scheduler import get_warmup_cosine_scheduler
 from src.seq2seq.training.tracker import MLflowTracker
 from src.seq2seq.training.trainer import Seq2SeqTrainer
@@ -12,4 +13,6 @@ __all__ = [
     "Seq2SeqTrainer",
     "TrainingVisualizer",
     "get_warmup_cosine_scheduler",
+    "average_checkpoints",
+    "load_averaged_model",
 ]

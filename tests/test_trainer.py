@@ -65,11 +65,13 @@ def test_warmup_cosine_scheduler():
 
     # Step at warmup midpoint
     for _ in range(50):
+        optimizer.step()
         scheduler.step()
     assert 0.0004 <= optimizer.param_groups[0]["lr"] <= 0.0006
 
     # Step to warmup peak
     for _ in range(50):
+        optimizer.step()
         scheduler.step()
     assert round(optimizer.param_groups[0]["lr"], 4) == 0.001
 
