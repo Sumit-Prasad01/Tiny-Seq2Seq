@@ -7,10 +7,11 @@ project:
   device: "cuda"
 
 data:
-  raw_dir: "data/raw"
-  cleaned_dir: "data/cleaned"
-  processed_dir: "data/processed"
-  tokenizer_dir: "data/tokenizer"
+  raw_dir: "artifacts/raw"
+  cleaned_dir: "artifacts/cleaned"
+  processed_dir: "artifacts/processed"
+  tokenizer_dir: "artifacts/tokenizer"
+
   source_lang: "en"
   target_lang: "fr"
   target_bytes: 262144000  # ~250 MB
