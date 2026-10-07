@@ -80,6 +80,7 @@ class Seq2SeqTrainer:
 
         # State tracking
         self.global_step = 0
+        self.total_training_steps = 0
         self.start_epoch = 1
         self.best_dev_ppl = float("inf")
         self.patience_counter = 0
@@ -99,16 +100,18 @@ class Seq2SeqTrainer:
         }
 
     def train_epoch(self, epoch: int, throughput: ThroughputTracker) -> Tuple[float, float]:
-        """Runs one full training epoch."""
+        """Runs one full training epoch with real-time step logging."""
         self.model.train()
         self.train_batcher.set_epoch(epoch)
         batches_plan = self.train_batcher.plan_batches()
+        total_batches = len(batches_plan)
 
         epoch_loss = 0.0
         epoch_tokens = 0
+        epoch_start_time = time.perf_counter()
         step_start_time = time.perf_counter()
 
-        for batch_indices in batches_plan:
+        for batch_idx, batch_indices in enumerate(batches_plan, start=1):
             batch: Batch = self.train_batcher.collate_batch(batch_indices).to(self.device)
             self.optimizer.zero_grad()
 
@@ -151,9 +154,38 @@ class Seq2SeqTrainer:
             self.history["tokens_per_sec"].append(t_stats["tokens_per_second"])
             self.history["vram_mb"].append(vram_info["allocated_mb"])
 
-            # Step logging
-            if self.global_step % self.log_steps == 0 or self.global_step == 1:
+            # Step logging: log at interval, first step, or last batch of epoch
+            if self.global_step % self.log_steps == 0 or self.global_step == 1 or batch_idx == total_batches:
                 step_ppl = compute_perplexity(step_loss_val)
+                batches_left = total_batches - batch_idx
+                batch_pct = (batch_idx / total_batches) * 100
+
+                # Epoch ETA calculation
+                epoch_elapsed = time.perf_counter() - epoch_start_time
+                avg_batch_time = epoch_elapsed / max(batch_idx, 1)
+                eta_sec = int(batches_left * avg_batch_time)
+                eta_str = f"{eta_sec // 60}m {eta_sec % 60:02d}s" if eta_sec >= 60 else f"{eta_sec}s"
+
+                # Format VRAM string
+                if self.device.type == "cuda":
+                    vram_str = f"{vram_info['allocated_mb']:.1f} MB alloc | {vram_info['peak_mb']:.1f} MB peak"
+                else:
+                    vram_str = "CPU"
+
+                total_steps_str = f"{self.total_training_steps:05d}" if self.total_training_steps > 0 else "???"
+
+                logger.info(
+                    f"Epoch {epoch:02d}/{self.epochs:02d} | "
+                    f"Batch {batch_idx:04d}/{total_batches:04d} ({batch_pct:4.1f}%) | "
+                    f"Step {self.global_step:05d}/{total_steps_str} | "
+                    f"Loss: {step_loss_val:.4f} (PPL: {step_ppl:7.2f}) | "
+                    f"LR: {current_lr:.6f} | "
+                    f"Grad: {grad_norm:4.2f} | "
+                    f"{t_stats['tokens_per_second']:6,.0f} tok/s | "
+                    f"VRAM: {vram_str} | "
+                    f"Epoch ETA: {eta_str}"
+                )
+
                 if self.tracker is not None:
                     self.tracker.log_step_metrics(
                         step=self.global_step,
@@ -164,6 +196,7 @@ class Seq2SeqTrainer:
                             "step/grad_norm": grad_norm,
                             "step/tokens_per_sec": t_stats["tokens_per_second"],
                             "step/vram_allocated_mb": vram_info["allocated_mb"],
+                            "step/vram_peak_mb": vram_info["peak_mb"],
                         },
                     )
 
@@ -179,6 +212,9 @@ class Seq2SeqTrainer:
 
         self.model.eval()
         dev_batches_plan = self.dev_batcher.plan_batches()
+        num_dev_batches = len(dev_batches_plan)
+        logger.info(f"Running evaluation on dev set ({num_dev_batches} batches)...")
+
         total_loss = 0.0
         total_tokens = 0
 
@@ -196,6 +232,7 @@ class Seq2SeqTrainer:
 
         avg_loss = total_loss / max(total_tokens, 1)
         ppl = compute_perplexity(avg_loss)
+        logger.info(f"Evaluation complete: Dev Loss: {avg_loss:.4f} | Dev PPL: {ppl:.2f}")
         return avg_loss, ppl
 
     @torch.no_grad()
@@ -287,27 +324,45 @@ class Seq2SeqTrainer:
             self.load_checkpoint(resume_path)
 
         batches_per_epoch = len(self.train_batcher.plan_batches())
-        total_training_steps = batches_per_epoch * self.epochs
-        logger.info(
-            f"Starting training: {self.epochs} epochs, {batches_per_epoch} batches/epoch, "
-            f"~{total_training_steps} total steps."
+        self.total_training_steps = batches_per_epoch * self.epochs
+
+        device_name = torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else "CPU"
+        total_gpu_mem = (
+            torch.cuda.get_device_properties(self.device).total_memory / (1024 ** 3)
+            if self.device.type == "cuda" else 0.0
         )
+
+        logger.info("=" * 80)
+        logger.info("TRAINING SESSION INITIALIZED")
+        logger.info(f"  Device:               {device_name} ({total_gpu_mem:.2f} GB Total VRAM)")
+        logger.info(f"  Schedule:             {self.epochs} epochs | {batches_per_epoch} batches/epoch (~{self.total_training_steps} total steps)")
+        logger.info(f"  Optimization:         Adam (lr={self.lr}, weight_decay={self.weight_decay}) | Grad Clip: {self.grad_clip_norm}")
+        logger.info(f"  Learning Rate Policy: Cosine warmup ({self.warmup_steps} warmup steps, min_ratio={self.min_lr_ratio})")
+        logger.info(f"  Precision & Batcher:  FP16 AMP: {self.amp_enabled} | Batcher: {self.train_batcher.__class__.__name__}")
+        logger.info(f"  Console Logging:      Every {self.log_steps} steps | MLflow tracking: {self.tracker is not None}")
+        logger.info("=" * 80)
 
         if self.scheduler is None:
             self.scheduler = get_warmup_cosine_scheduler(
                 self.optimizer,
                 warmup_steps=self.warmup_steps,
-                total_steps=total_training_steps,
+                total_steps=self.total_training_steps,
                 min_lr_ratio=self.min_lr_ratio,
             )
 
         throughput = ThroughputTracker()
+        total_training_start = time.perf_counter()
 
         for epoch in range(self.start_epoch, self.epochs + 1):
             epoch_start = time.perf_counter()
             train_loss, train_ppl = self.train_epoch(epoch, throughput)
+            train_duration = time.perf_counter() - epoch_start
+
+            eval_start = time.perf_counter()
             dev_loss, dev_ppl = self.evaluate()
+            eval_duration = time.perf_counter() - eval_start
             epoch_duration = time.perf_counter() - epoch_start
+            total_elapsed = time.perf_counter() - total_training_start
 
             # Record history
             self.history["train_losses"].append(train_loss)
@@ -322,8 +377,10 @@ class Seq2SeqTrainer:
                 self.patience_counter = 0
                 best_path = os.path.join(self.checkpoint_dir, "checkpoint_best.pt")
                 self.save_checkpoint(best_path, is_best=True)
+                status_banner = ">>> NEW BEST DEV PPL! Checkpoint saved <<<"
             else:
                 self.patience_counter += 1
+                status_banner = f"No improvement (Patience: {self.patience_counter}/{self.early_stopping_patience})"
 
             # Save latest checkpoint
             latest_path = os.path.join(self.checkpoint_dir, "checkpoint_latest.pt")
@@ -331,12 +388,35 @@ class Seq2SeqTrainer:
             self.save_checkpoint(latest_path, is_best=False)
 
             vram = get_gpu_memory_mb()
+
+            # Calculate total training ETA
+            epochs_completed = epoch - self.start_epoch + 1
+            avg_epoch_time = total_elapsed / max(epochs_completed, 1)
+            remaining_epochs = self.epochs - epoch
+            overall_eta_sec = int(remaining_epochs * avg_epoch_time)
+            overall_eta_str = f"{overall_eta_sec // 60}m {overall_eta_sec % 60:02d}s" if overall_eta_sec >= 60 else f"{overall_eta_sec}s"
+
+            logger.info("=" * 80)
+            logger.info(f"EPOCH {epoch:02d}/{self.epochs:02d} SUMMARY  |  {status_banner}")
+            logger.info("-" * 80)
             logger.info(
-                f"Epoch {epoch:02d}/{self.epochs:02d} | "
-                f"Train Loss: {train_loss:.4f} (PPL: {train_ppl:.2f}) | "
-                f"Dev Loss: {dev_loss:.4f} (PPL: {dev_ppl:.2f}) | "
-                f"Time: {epoch_duration:.1f}s | VRAM Peak: {vram['peak_mb']} MB"
+                f"  Train:      Loss: {train_loss:.4f}  |  PPL: {train_ppl:.2f}  |  "
+                f"Time: {train_duration:.1f}s  |  Speed: {throughput.update(0)['avg_tokens_per_second']:,.0f} tok/s"
             )
+            logger.info(
+                f"  Dev Eval:   Loss: {dev_loss:.4f}  |  PPL: {dev_ppl:.2f}  |  "
+                f"Time: {eval_duration:.1f}s"
+            )
+            logger.info(
+                f"  GPU VRAM:   Allocated: {vram['allocated_mb']:.1f} MB  |  "
+                f"Reserved: {vram['reserved_mb']:.1f} MB  |  Peak: {vram['peak_mb']:.1f} MB"
+            )
+            logger.info(
+                f"  Progress:   Steps: {self.global_step:05d}/{self.total_training_steps:05d}  |  "
+                f"Session Elapsed: {int(total_elapsed // 60)}m {int(total_elapsed % 60):02d}s  |  "
+                f"Training ETA: {overall_eta_str}"
+            )
+            logger.info("=" * 80)
 
             # Generate Canary translations and log to MLflow
             canary_samples = self.generate_canary_translations(num_samples=5)
@@ -348,8 +428,12 @@ class Seq2SeqTrainer:
                         "epoch/train_ppl": train_ppl,
                         "epoch/dev_loss": dev_loss,
                         "epoch/dev_ppl": dev_ppl,
-                        "epoch/duration_sec": epoch_duration,
+                        "epoch/train_duration_sec": train_duration,
+                        "epoch/eval_duration_sec": eval_duration,
+                        "epoch/total_duration_sec": epoch_duration,
                         "epoch/peak_vram_mb": vram["peak_mb"],
+                        "epoch/allocated_vram_mb": vram["allocated_mb"],
+                        "epoch/global_step": self.global_step,
                     },
                 )
                 self.tracker.log_translation_samples(canary_samples, epoch=epoch)

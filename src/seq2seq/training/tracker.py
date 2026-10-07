@@ -49,12 +49,26 @@ class MLflowTracker:
         mlflow.set_tracking_uri(self.tracking_uri)
 
         # Get or create experiment
-        self.experiment = mlflow.get_experiment_by_name(self.experiment_name)
+        client = mlflow.tracking.MlflowClient()
+        self.experiment = client.get_experiment_by_name(self.experiment_name)
         if self.experiment is None:
-            self.experiment_id = mlflow.create_experiment(
+            self.experiment_id = client.create_experiment(
                 name=self.experiment_name,
                 artifact_location=self.artifact_location,
             )
+        elif self.experiment.lifecycle_stage == "deleted":
+            try:
+                client.restore_experiment(self.experiment.experiment_id)
+                logger.info(f"Restored deleted experiment '{self.experiment_name}' (ID: {self.experiment.experiment_id}).")
+                self.experiment_id = self.experiment.experiment_id
+            except Exception as e:
+                import time
+                new_name = f"{self.experiment_name}_{int(time.time())}"
+                logger.warning(f"Could not restore experiment '{self.experiment_name}' ({e}). Creating new experiment '{new_name}'.")
+                self.experiment_id = client.create_experiment(
+                    name=new_name,
+                    artifact_location=self.artifact_location,
+                )
         else:
             self.experiment_id = self.experiment.experiment_id
 

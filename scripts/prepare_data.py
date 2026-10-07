@@ -45,7 +45,15 @@ def generate_synthetic_corpus(num_pairs: int = 10000) -> List[Tuple[str, str]]:
     return pairs
 
 
-def prepare_data(config_path: str = "configs/base_config.yaml", use_synthetic: bool = False, max_pairs: int = None) -> None:
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+
+def prepare_data(
+    config_path: str = "configs/base_config.yaml",
+    dataset_name: str = "opus-100",
+    use_synthetic: bool = False,
+    max_pairs: int = None,
+) -> None:
     config = load_config(config_path)
     data_cfg = config["data"]
     mlflow_cfg = config["mlflow"]
@@ -64,21 +72,41 @@ def prepare_data(config_path: str = "configs/base_config.yaml", use_synthetic: b
     logger.info("Gathering parallel sentence pairs...")
     raw_pairs: List[Tuple[str, str]] = []
 
-    if use_synthetic:
+    if use_synthetic or dataset_name == "synthetic":
         logger.info("Generating synthetic En-Fr corpus for verification...")
         count = max_pairs or 15000
         raw_pairs = generate_synthetic_corpus(num_pairs=count)
     else:
-        try:
-            from datasets import load_dataset
-            logger.info("Attempting to load parallel data from Hugging Face datasets (opus_books en-fr)...")
-            dataset = load_dataset("opus_books", "en-fr", split="train")
-            for item in dataset:
-                trans = item["translation"]
-                raw_pairs.append((trans[src_lang], trans[tgt_lang]))
-            logger.info(f"Loaded {len(raw_pairs)} pairs from Hugging Face opus_books.")
-        except Exception as e:
-            logger.warning(f"Could not load online dataset ({e}). Falling back to synthetic verification corpus.")
+        # Priority list of datasets to attempt
+        candidates = []
+        if dataset_name == "opus-100":
+            candidates = [("Helsinki-NLP/opus-100", "en-fr"), ("Helsinki-NLP/opus_books", "en-fr")]
+        elif dataset_name == "opus_books":
+            candidates = [("Helsinki-NLP/opus_books", "en-fr"), ("Helsinki-NLP/opus-100", "en-fr")]
+        else:
+            candidates = [(dataset_name, "en-fr")]
+
+        loaded = False
+        for repo_id, sub_config in candidates:
+            try:
+                from datasets import load_dataset
+                logger.info(f"Attempting download/load of parallel corpus from Hugging Face: '{repo_id}' ({sub_config})...")
+                ds = load_dataset(repo_id, sub_config, split="train")
+                logger.info(f"Successfully loaded '{repo_id}'. Extracting sentence pairs...")
+                for item in ds:
+                    trans = item["translation"]
+                    if src_lang in trans and tgt_lang in trans:
+                        raw_pairs.append((trans[src_lang], trans[tgt_lang]))
+                    if max_pairs and len(raw_pairs) >= max_pairs:
+                        break
+                logger.info(f"Gathered {len(raw_pairs)} pairs from '{repo_id}'.")
+                loaded = True
+                break
+            except Exception as e:
+                logger.warning(f"Could not load '{repo_id}' ({e}). Trying next fallback...")
+
+        if not loaded or len(raw_pairs) == 0:
+            logger.warning("All online dataset downloads failed. Falling back to synthetic verification corpus.")
             raw_pairs = generate_synthetic_corpus(num_pairs=max_pairs or 15000)
 
     # Random shuffle before slicing to prevent domain concentration
@@ -178,8 +206,14 @@ def prepare_data(config_path: str = "configs/base_config.yaml", use_synthetic: b
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare parallel text data for Tiny-Seq2Seq")
     parser.add_argument("--config", type=str, default="configs/base_config.yaml", help="Path to config")
+    parser.add_argument("--dataset", type=str, default="opus-100", choices=["opus-100", "opus_books", "synthetic"], help="Dataset source to download")
     parser.add_argument("--synthetic", action="store_true", help="Generate synthetic corpus for fast verification")
     parser.add_argument("--max-pairs", type=int, default=None, help="Limit number of pairs")
     args = parser.parse_args()
 
-    prepare_data(config_path=args.config, use_synthetic=args.synthetic, max_pairs=args.max_pairs)
+    prepare_data(
+        config_path=args.config,
+        dataset_name=args.dataset,
+        use_synthetic=args.synthetic,
+        max_pairs=args.max_pairs,
+    )
