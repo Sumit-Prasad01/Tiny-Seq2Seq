@@ -1,0 +1,79 @@
+# Tiny-Seq2Seq 4-Layer GRU with Byte-Level BPE (BBPE) Tokenizer
+# Replaces 4-layer LSTM with 4-layer GRU and SentencePiece with Rust-backed BBPE
+# 67.27M parameters, low memory footprint on NVIDIA RTX 3050 Laptop GPU (4 GB VRAM)
+
+project:
+  name: "Tiny-Seq2Seq-GRU-BBPE"
+  seed: 42
+  device: "cuda"
+
+data:
+  raw_dir: "artifacts/raw"
+  cleaned_dir: "artifacts/cleaned"
+  processed_dir: "artifacts/processed_bbpe"
+  tokenizer_dir: "artifacts/tokenizer_bbpe"
+
+  source_lang: "en"
+  target_lang: "fr"
+  target_bytes: 262144000  # ~250 MB
+  max_seq_len: 64
+  min_seq_len: 1
+  max_length_ratio: 2.5
+  dev_size: 3000
+  test_size: 3000
+
+tokenizer:
+  model_type: "bbpe"
+  vocab_size: 16000
+  min_frequency: 2
+  pad_id: 0
+  unk_id: 1
+  bos_id: 2
+  eos_id: 3
+  pad_token: "<pad>"
+  unk_token: "<unk>"
+  bos_token: "<bos>"
+  eos_token: "<eos>"
+
+model:
+  model_type: "gru"
+  vocab_size: 16000
+  d_model: 896               # 67.27M parameters (Tensor Core aligned: 14 * 64)
+  n_layers: 4                # 4-layer cuDNN GRU
+  dropout: 0.2
+  tie_weights: true          # Tied target embedding and output projection
+  init_uniform_bound: 0.08   # Uniform [-0.08, 0.08]
+  reverse_source: true       # Source reversal: x_T ... x_1 -> y_1 ... y_T'
+
+training:
+  token_budget: 4000
+  max_tokens_per_batch: 4000
+  gradient_accumulation_steps: 1
+  optimizer: "adam"
+  learning_rate: 0.001
+  warmup_steps: 1000
+  min_lr_ratio: 0.05
+  weight_decay: 0.0001
+  grad_clip_norm: 5.0
+  label_smoothing: 0.0
+  amp_enabled: true
+  epochs: 10
+  eval_every_epochs: 1
+  early_stopping_patience: 2
+  log_steps: 50
+  use_c_batcher: true
+  checkpoint_dir: "checkpoints/gru_bbpe"
+
+decoding:
+  beam_sizes: [1, 2, 5, 12]
+  default_beam_size: 5
+  length_penalty_alpha: 0.6
+  max_decoding_len_ratio: 1.5
+  max_decoding_len_const: 10
+
+mlflow:
+  tracking_uri: "sqlite:///mlruns.db"
+  artifact_location: "mlruns"
+  experiment_training: "TinySeq2Seq-GRU-BBPE-Training"
+  experiment_evaluation: "TinySeq2Seq-GRU-BBPE-Evaluation"
+  experiment_data: "TinySeq2Seq-GRU-BBPE-Data"

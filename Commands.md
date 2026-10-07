@@ -256,3 +256,93 @@ python -m pytest -v
 - **VRAM Budget on RTX 3050 (4 GB)**:
   - If CUDA Out of Memory occurs during long sequence training, reduce `token_budget` in `configs/base_config.yaml` from `4096` to `2048` or `1024`.
 - **Plot Directory**: All diagnostic and comparative figures are saved in [`artifacts/plots/`](file:///C:/Users/sumit/OneDrive/Desktop/Code_PlayGround/LLM_Engineering/Tiny-Seq2Seq/artifacts/plots) and [`artifacts/plots/ablations/`](file:///C:/Users/sumit/OneDrive/Desktop/Code_PlayGround/LLM_Engineering/Tiny-Seq2Seq/artifacts/plots/ablations).
+
+---
+
+## 5. 4-Layer GRU & Byte-Level BPE (BBPE) Experiment Commands
+
+An experimental alternative architecture comparing **4-layer cuDNN GRU** against 4-layer LSTM, paired with a **Byte-Level BPE (BBPE)** tokenizer and accelerated by the compiled **C++ Batch Builder** (`seq2seq_c_batcher`).
+
+### Architecture & Advantages
+- **Parameters**: 67.27M ($d_{model}=896$, $n_{layers}=4$, $V=16,000$, tied embeddings).
+- **VRAM Savings**: Single recurrent hidden state $h \in \mathbb{R}^{L \times B \times d}$ (saving 50% state memory vs. LSTM $(h, c)$). Peak VRAM is only ~700 MB.
+- **BBPE Robustness**: Zero out-of-vocabulary (`<unk>`) rate via 256 base byte tokens.
+- **C++ Batcher Acceleration**: 182x faster dataset bin-packing and collation with GIL release.
+- **Dedicated Config**: [`configs/config_gru_bbpe.yaml`](file:///C:/Users/sumit/OneDrive/Desktop/Code_PlayGround/LLM_Engineering/Tiny-Seq2Seq/configs/config_gru_bbpe.yaml).
+
+---
+
+### Step 1: Train Byte-Level BPE Tokenizer
+Trains a 16k Byte-Level BPE model on cleaned parallel text with special tokens (`<pad>=0`, `<unk>=1`, `<bos>=2`, `<eos>=3`):
+
+```powershell
+python scripts/train_bbpe_tokenizer.py --config configs/config_gru_bbpe.yaml --vocab-size 16000
+```
+- **Inputs**: `artifacts/cleaned/train.en`, `artifacts/cleaned/train.fr`
+- **Output**: `artifacts/tokenizer_bbpe/bbpe_16k.json`
+- **MLflow Tracking**: Experiment `TinySeq2Seq-GRU-BBPE-Data`
+
+---
+
+### Step 2: High-Throughput Binary Serialization
+Serializes cleaned corpora into memory-mappable `uint16` flat binary files and `int64` index offsets using native Rust/C-ABI multithreaded batch tokenization:
+
+```powershell
+python scripts/prepare_bbpe_binary_data.py --config configs/config_gru_bbpe.yaml
+```
+- **Inputs**: `artifacts/cleaned/*.en`, `artifacts/cleaned/*.fr`
+- **Outputs**:
+  - `artifacts/processed_bbpe/train.en.bin` & `train.en.idx`
+  - `artifacts/processed_bbpe/train.fr.bin` & `train.fr.idx`
+  - `artifacts/processed_bbpe/val.en.bin` & `val.en.idx`
+  - `artifacts/processed_bbpe/val.fr.bin` & `val.fr.idx`
+  - `artifacts/processed_bbpe/test.en.bin` & `test.en.idx`
+  - `artifacts/processed_bbpe/test.fr.bin` & `test.fr.idx`
+
+---
+
+### Step 3: Train 4-Layer GRU Seq2Seq Model
+Trains the 67.27M GRU model using compiled C++ batching (`CppBucketBatcher`), AMP mixed precision, warmup cosine scheduling, and gradient clipping at 5.0:
+
+```powershell
+python scripts/train_gru.py --config configs/config_gru_bbpe.yaml --epochs 10 --token-budget 4000
+```
+
+#### Quick 1-Epoch Validation Run:
+```powershell
+python scripts/train_gru.py --config configs/config_gru_bbpe.yaml --epochs 1 --token-budget 2000 --run-name quick_gru_check
+```
+
+#### Resume Training from Checkpoint:
+```powershell
+python scripts/train_gru.py --config configs/config_gru_bbpe.yaml --resume
+```
+- **Checkpoints**: `checkpoints/gru_bbpe/checkpoint_latest.pt` & `checkpoint_best.pt`
+- **MLflow Tracking**: Experiment `TinySeq2Seq-GRU-BBPE-Training`
+- **Diagnostic Plots**: `artifacts/plots/gru_loss_perplexity.png`, `gru_hardware_throughput.png`, etc.
+
+---
+
+### Step 4: Evaluate 4-Layer GRU with Vectorized Beam Search
+Evaluates the trained GRU model using `GRUBeamSearchDecoder` across beam widths $K \in \{1, 2, 5, 12\}$ and computes SacreBLEU with length bucket degradation:
+
+```powershell
+python scripts/evaluate_gru.py --config configs/config_gru_bbpe.yaml --checkpoint checkpoints/gru_bbpe/checkpoint_best.pt --split test
+```
+
+#### Quick Evaluation on 200 Sentences:
+```powershell
+python scripts/evaluate_gru.py --config configs/config_gru_bbpe.yaml --checkpoint checkpoints/gru_bbpe/checkpoint_best.pt --split test --max-sentences 200
+```
+- **Metrics**: SacreBLEU overall, Short (<15 tokens), Medium (15-30 tokens), Long (>30 tokens).
+- **MLflow Tracking**: Experiment `TinySeq2Seq-GRU-BBPE-Evaluation`
+
+---
+
+### Step 5: Run GRU & BBPE Unit Test Suite
+Runs the dedicated unit test suite verifying BBPE tokenization, GRU forward/backward pass, and vectorized GRU beam search:
+
+```powershell
+python -m pytest tests/test_gru_bbpe.py -v
+```
+
