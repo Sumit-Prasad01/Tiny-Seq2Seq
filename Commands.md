@@ -346,3 +346,65 @@ Runs the dedicated unit test suite verifying BBPE tokenization, GRU forward/back
 python -m pytest tests/test_gru_bbpe.py -v
 ```
 
+---
+
+## 6. 4-Layer Bidirectional LSTM (BiLSTM) Experiment Commands
+
+An experimental architecture comparing a **4-layer cuDNN Bidirectional LSTM (BiLSTM)** against unidirectional LSTM and GRU, featuring per-layer bridge projection and accelerated by the compiled **C++ Batch Builder** (`seq2seq_c_batcher`).
+
+### Architecture & Specifications
+- **Parameters**: 76.27M ($d_{model}=640$, $n_{layers}=4$, $V=16,000$, tied embeddings). Tensor Core aligned ($10 \times 64$).
+- **Bidirectional Encoder**: 4-layer cuDNN BiLSTM reading source text forward and backward simultaneously.
+- **Bridge Projection**: Per-layer non-linear bridge (`Linear(2 * d_model, d_model)` + `Tanh`) projecting concatenated states $[h_{fwd}; h_{bwd}]$ and $[c_{fwd}; c_{bwd}]$ into the unidirectional decoder initial state.
+- **VRAM Budget**: Peak training VRAM is ~1.1 GB on NVIDIA RTX 3050 Laptop GPU (4 GB VRAM ceiling).
+- **C++ Batcher Acceleration**: Uses `seq2seq_c_batcher` for 182x faster length-bucketed batch assembly with GIL release.
+- **Dedicated Config**: [`configs/config_bilstm.yaml`](file:///C:/Users/sumit/OneDrive/Desktop/Code_PlayGround/LLM_Engineering/Tiny-Seq2Seq/configs/config_bilstm.yaml).
+
+---
+
+### Step 1: Train 4-Layer BiLSTM Seq2Seq Model
+Trains the 76.27M BiLSTM model using compiled C++ batching (`CppBucketBatcher`), AMP mixed precision, warmup cosine scheduling, and gradient clipping at 5.0:
+
+```powershell
+python scripts/train_bilstm.py --config configs/config_bilstm.yaml --epochs 10 --token-budget 4000
+```
+
+#### Quick 1-Epoch Validation Run:
+```powershell
+python scripts/train_bilstm.py --config configs/config_bilstm.yaml --epochs 1 --token-budget 2000 --run-name quick_bilstm_check
+```
+
+#### Resume Training from Checkpoint:
+```powershell
+python scripts/train_bilstm.py --config configs/config_bilstm.yaml --resume
+```
+- **Checkpoints**: `checkpoints/bilstm/checkpoint_latest.pt` & `checkpoint_best.pt`
+- **MLflow Tracking**: Experiment `TinySeq2Seq-BiLSTM-Training`
+- **Diagnostic Plots**: `artifacts/plots/bilstm_loss_perplexity.png`, `bilstm_hardware_throughput.png`, etc.
+
+---
+
+### Step 2: Evaluate 4-Layer BiLSTM with Vectorized Beam Search
+Evaluates the trained BiLSTM model using `BiLSTMBeamSearchDecoder` across beam widths $K \in \{1, 2, 5, 12\}$ and computes SacreBLEU with length bucket degradation:
+
+```powershell
+python scripts/evaluate_bilstm.py --config configs/config_bilstm.yaml --checkpoint checkpoints/bilstm/checkpoint_best.pt --split test
+```
+
+#### Quick Evaluation on 200 Sentences:
+```powershell
+python scripts/evaluate_bilstm.py --config configs/config_bilstm.yaml --checkpoint checkpoints/bilstm/checkpoint_best.pt --split test --max-sentences 200
+```
+- **Metrics**: SacreBLEU overall, Short (<15 tokens), Medium (15-30 tokens), Long (>30 tokens).
+- **MLflow Tracking**: Experiment `TinySeq2Seq-BiLSTM-Evaluation`
+
+---
+
+### Step 3: Run BiLSTM Unit Test Suite
+Runs the dedicated unit test suite verifying BiLSTM encoder, layer-wise bridge projection, decoder, gradient flow, and vectorized beam search:
+
+```powershell
+python -m pytest tests/test_bilstm.py -v
+```
+
+
